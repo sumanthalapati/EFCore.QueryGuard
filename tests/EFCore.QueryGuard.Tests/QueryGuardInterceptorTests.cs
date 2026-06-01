@@ -27,7 +27,7 @@ public sealed class TestDbContext : DbContext
 /// SQLite in-memory databases are tied to a single connection; this scope keeps it alive
 /// for the test's lifetime and disposes everything together.
 /// </summary>
-file sealed class TestDbScope : IAsyncDisposable
+internal sealed class TestDbScope : IAsyncDisposable
 {
     public TestDbContext Db { get; }
     public QueryGuardInterceptor Interceptor { get; }

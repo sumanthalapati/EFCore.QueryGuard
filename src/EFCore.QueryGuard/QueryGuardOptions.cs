@@ -60,7 +60,7 @@ public sealed class QueryGuardOptions
     /// <summary>
     /// Validates the current option values and throws <see cref="InvalidOperationException"/>
     /// if any constraint is violated.
-    /// Called automatically by <see cref="QueryGuardDbContextExtensions.UseQueryGuard"/> and
+    /// Called automatically by <see cref="QueryGuardDbContextExtensions"/> and
     /// <see cref="QueryGuardOptionsBuilder.Build"/>.
     /// </summary>
     /// <exception cref="InvalidOperationException">One or more option values are invalid.</exception>

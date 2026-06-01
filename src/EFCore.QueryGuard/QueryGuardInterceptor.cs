@@ -102,16 +102,17 @@ public sealed class QueryGuardInterceptor : DbCommandInterceptor, IQueryGuardSco
     }
 
     /// <inheritdoc/>
-    public override InterceptionResult<object?> ScalarExecuting(
-        DbCommand command, CommandEventData eventData, InterceptionResult<object?> result)
+    // Note: the base class uses non-nullable `object` here (scalar result before execution).
+    public override InterceptionResult<object> ScalarExecuting(
+        DbCommand command, CommandEventData eventData, InterceptionResult<object> result)
     {
         CommandTimerStore.Start(command);
         return base.ScalarExecuting(command, eventData, result);
     }
 
     /// <inheritdoc/>
-    public override ValueTask<InterceptionResult<object?>> ScalarExecutingAsync(
-        DbCommand command, CommandEventData eventData, InterceptionResult<object?> result,
+    public override ValueTask<InterceptionResult<object>> ScalarExecutingAsync(
+        DbCommand command, CommandEventData eventData, InterceptionResult<object> result,
         CancellationToken cancellationToken = default)
     {
         CommandTimerStore.Start(command);
