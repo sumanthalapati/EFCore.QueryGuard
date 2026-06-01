@@ -55,33 +55,38 @@ jobs:
       - name: Restore dependencies
         run: dotnet restore
 
-      # Strip the leading "v" from the tag (v1.2.3 → 1.2.3) and pass it as the package version.
+      # Strip the leading "v" from the tag (v1.2.3 → 1.2.3) and use it as the version.
       - name: Extract version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Pack EFCore.QueryGuard
-        run: >
-          dotnet pack src/EFCore.QueryGuard/EFCore.QueryGuard.csproj
-          --no-restore
-          --configuration Release
-          -p:Version=${{ steps.version.outputs.VERSION }}
-          --output ./nupkgs
+        run: |
+          dotnet pack src/EFCore.QueryGuard/EFCore.QueryGuard.csproj \
+            --no-restore \
+            --configuration Release \
+            -p:Version=${{ steps.version.outputs.VERSION }} \
+            --output ./nupkgs
 
       - name: Pack EFCore.QueryGuard.AspNetCore
-        run: >
-          dotnet pack src/EFCore.QueryGuard.AspNetCore/EFCore.QueryGuard.AspNetCore.csproj
-          --no-restore
-          --configuration Release
-          -p:Version=${{ steps.version.outputs.VERSION }}
-          --output ./nupkgs
+        run: |
+          dotnet pack src/EFCore.QueryGuard.AspNetCore/EFCore.QueryGuard.AspNetCore.csproj \
+            --no-restore \
+            --configuration Release \
+            -p:Version=${{ steps.version.outputs.VERSION }} \
+            --output ./nupkgs
 
+      # Push each .nupkg individually — dotnet nuget push only accepts one file
+      # at a time when the glob expands to multiple packages.
       - name: Publish to NuGet.org
-        run: >
-          dotnet nuget push ./nupkgs/*.nupkg
-          --api-key ${{ secrets.NUGET_API_KEY }}
-          --source https://api.nuget.org/v3/index.json
-          --skip-duplicate
+        run: |
+          for package in ./nupkgs/*.nupkg; do
+            echo "Publishing $package..."
+            dotnet nuget push "$package" \
+              --api-key "${{ secrets.NUGET_API_KEY }}" \
+              --source "https://api.nuget.org/v3/index.json" \
+              --skip-duplicate
+          done
 
       - name: Upload packages as artifacts
         uses: actions/upload-artifact@v4
