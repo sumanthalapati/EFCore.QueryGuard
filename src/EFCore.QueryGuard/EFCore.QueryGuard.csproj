@@ -9,15 +9,28 @@
 
     <PackageId>EFCore.QueryGuard</PackageId>
     <Version>1.0.0</Version>
-    <Authors>EFCore.QueryGuard Contributors</Authors>
+    <Authors>Sumanth Alapati</Authors>
+    <Copyright>Copyright © 2026 Sumanth Alapati</Copyright>
     <Description>A lightweight EF Core interceptor that detects N+1 queries, slow queries, and excessive query counts at runtime — before they hit production.</Description>
-    <PackageTags>efcore;entity-framework;n+1;performance;diagnostics;query</PackageTags>
+    <PackageTags>efcore;entity-framework;n+1;performance;diagnostics;query;interceptor</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/alapatichvsumanth/EFCore.QueryGuard</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/alapatichvsumanth/EFCore.QueryGuard</PackageProjectUrl>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <!-- Version is overridden by CI from the git tag, e.g. v1.0.0 → 1.0.0 -->
+    <VersionPrefix>1.0.0</VersionPrefix>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="8.0.0" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
   <ItemGroup>
