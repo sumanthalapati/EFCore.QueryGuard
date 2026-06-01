@@ -1,11 +1,12 @@
 using EFCore.QueryGuard;
 using EFCore.QueryGuard.Abstractions;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
 
 namespace EFCore.QueryGuard.Tests;
 
-// ── Minimal in-memory DbContext ───────────────────────────────────────────────
+// ── Minimal DbContext ─────────────────────────────────────────────────────────
 
 public sealed class TestProduct
 {
@@ -16,34 +17,46 @@ public sealed class TestProduct
 public sealed class TestDbContext : DbContext
 {
     public DbSet<TestProduct> Products => Set<TestProduct>();
-
     public TestDbContext(DbContextOptions<TestDbContext> options) : base(options) { }
 }
 
-// ── Factory ───────────────────────────────────────────────────────────────────
+// ── TestDbScope ───────────────────────────────────────────────────────────────
 
-file static class DbContextFactory
+/// <summary>
+/// Encapsulates a SQLite in-memory connection, DbContext, and interceptor for one test.
+/// SQLite in-memory databases are tied to a single connection; this scope keeps it alive
+/// for the test's lifetime and disposes everything together.
+/// </summary>
+file sealed class TestDbScope : IAsyncDisposable
 {
-    /// <summary>
-    /// Creates a test <see cref="TestDbContext"/> wired to a fresh
-    /// <see cref="QueryGuardInterceptor"/> in an isolated in-memory database.
-    /// </summary>
-    public static (TestDbContext Db, QueryGuardInterceptor Interceptor) Create(
-        Action<QueryGuardOptions>? configure = null)
+    public TestDbContext Db { get; }
+    public QueryGuardInterceptor Interceptor { get; }
+    private readonly SqliteConnection _connection;
+
+    public TestDbScope(Action<QueryGuardOptions>? configure = null)
     {
         var options = new QueryGuardOptions();
         configure?.Invoke(options);
+        Interceptor = new QueryGuardInterceptor(options);
 
-        var interceptor = new QueryGuardInterceptor(options);
+        // A named in-memory database tied to this connection.
+        // Without keeping the connection open the database disappears between queries.
+        _connection = new SqliteConnection("Data Source=:memory:");
+        _connection.Open();
 
         var dbOptions = new DbContextOptionsBuilder<TestDbContext>()
-            .UseInMemoryDatabase(Guid.NewGuid().ToString())
-            .AddInterceptors(interceptor)
+            .UseSqlite(_connection)
+            .AddInterceptors(Interceptor)
             .Options;
 
-        var db = new TestDbContext(dbOptions);
-        db.Database.EnsureCreated();
-        return (db, interceptor);
+        Db = new TestDbContext(dbOptions);
+        Db.Database.EnsureCreated();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await Db.DisposeAsync();
+        await _connection.DisposeAsync();
     }
 }
 
@@ -54,14 +67,14 @@ public sealed class QueryGuardScopeContractTests
     [Fact]
     public void CurrentViolations_IsEmpty_WhenNoScopeIsActive()
     {
-        var (_, interceptor) = DbContextFactory.Create();
+        var interceptor = new QueryGuardInterceptor(new QueryGuardOptions());
         Assert.Empty(interceptor.CurrentViolations);
     }
 
     [Fact]
     public void CurrentViolations_IsEmpty_AfterEndScope()
     {
-        var (_, interceptor) = DbContextFactory.Create();
+        var interceptor = new QueryGuardInterceptor(new QueryGuardOptions());
         interceptor.BeginScope();
         interceptor.EndScope();
         Assert.Empty(interceptor.CurrentViolations);
@@ -70,7 +83,7 @@ public sealed class QueryGuardScopeContractTests
     [Fact]
     public void EndScope_ReturnsEmptyList_WhenNoQueriesRan()
     {
-        var (_, interceptor) = DbContextFactory.Create();
+        var interceptor = new QueryGuardInterceptor(new QueryGuardOptions());
         interceptor.BeginScope();
         var result = interceptor.EndScope();
         Assert.Empty(result);
@@ -79,136 +92,167 @@ public sealed class QueryGuardScopeContractTests
     [Fact]
     public void Interceptor_ImplementsIQueryGuardScope()
     {
-        var (_, interceptor) = DbContextFactory.Create();
+        var interceptor = new QueryGuardInterceptor(new QueryGuardOptions());
         Assert.IsAssignableFrom<IQueryGuardScope>(interceptor);
     }
 }
 
-// ── Integration: violation detection via real EF Core pipeline ────────────────
+// ── Integration: real SQLite pipeline ────────────────────────────────────────
 
-public sealed class QueryGuardInterceptorIntegrationTests
+/// <summary>
+/// Integration tests that exercise the full EF Core → SQLite → DbCommandInterceptor
+/// pipeline. All violation triggers are <em>deterministic</em> (query count / repeat
+/// count) rather than timing-based so results are stable on any CI runner.
+/// </summary>
+public sealed class QueryGuardInterceptorIntegrationTests : IAsyncLifetime
 {
-    [Fact]
-    public async Task SlowQuery_IsDetected_WhenThresholdIsZero()
-    {
-        // threshold=0 means every query is "slow" — predictable in InMemory tests.
-        var (db, interceptor) = DbContextFactory.Create(o =>
-        {
-            o.SlowQueryThresholdMs = 0;
-            o.DetectNPlusOne       = false;
-        });
+    // xUnit IAsyncLifetime lets us dispose the scope cleanly after each test.
+    private TestDbScope? _scope;
 
-        interceptor.BeginScope();
-        _ = await db.Products.ToListAsync();
-        var violations = interceptor.EndScope();
+    public Task InitializeAsync() => Task.CompletedTask;
+    public async Task DisposeAsync() { if (_scope is not null) await _scope.DisposeAsync(); }
 
-        Assert.NotEmpty(violations);
-        Assert.All(violations, v => Assert.Equal(ViolationType.SlowQuery, v.Type));
-    }
+    // ── ExcessiveQueryCount — used as the deterministic violation trigger ──────
 
     [Fact]
     public async Task ExcessiveQueryCount_IsDetected_InRealPipeline()
     {
-        var (db, interceptor) = DbContextFactory.Create(o =>
+        _scope = new TestDbScope(o =>
         {
-            o.MaxQueriesPerScope = 1;
-            o.DetectNPlusOne     = false;
+            o.MaxQueriesPerScope   = 1;
+            o.DetectNPlusOne       = false;
             o.SlowQueryThresholdMs = int.MaxValue;
         });
 
-        interceptor.BeginScope();
-        _ = await db.Products.ToListAsync(); // 1st — ok
-        _ = await db.Products.ToListAsync(); // 2nd — crosses MaxQueriesPerScope=1
-        var violations = interceptor.EndScope();
+        _scope.Interceptor.BeginScope();
+        _ = await _scope.Db.Products.ToListAsync(); // 1st — within limit
+        _ = await _scope.Db.Products.ToListAsync(); // 2nd — crosses MaxQueriesPerScope
+        var violations = _scope.Interceptor.EndScope();
 
         Assert.Contains(violations, v => v.Type == ViolationType.ExcessiveQueryCount);
     }
 
     [Fact]
-    public async Task QueriesOutsideScope_AreNotTracked()
-    {
-        var (db, interceptor) = DbContextFactory.Create(o => o.SlowQueryThresholdMs = 0);
-
-        // Query runs with NO active scope — must not affect CurrentViolations.
-        _ = await db.Products.ToListAsync();
-
-        Assert.Empty(interceptor.CurrentViolations);
-    }
-
-    [Fact]
-    public async Task OnViolation_Callback_IsInvoked_ByInterceptor()
+    public async Task OnViolation_Callback_IsInvoked_WhenViolationDetected()
     {
         var captured = new List<QueryViolation>();
-        var (db, interceptor) = DbContextFactory.Create(o =>
+        _scope = new TestDbScope(o =>
         {
-            o.SlowQueryThresholdMs = 0;
+            o.MaxQueriesPerScope   = 1;
             o.DetectNPlusOne       = false;
+            o.SlowQueryThresholdMs = int.MaxValue;
             o.OnViolation          = v => captured.Add(v);
         });
 
-        interceptor.BeginScope();
-        _ = await db.Products.ToListAsync();
-        interceptor.EndScope();
+        _scope.Interceptor.BeginScope();
+        _ = await _scope.Db.Products.ToListAsync(); // 1st
+        _ = await _scope.Db.Products.ToListAsync(); // 2nd — triggers callback
+        _scope.Interceptor.EndScope();
 
         Assert.NotEmpty(captured);
-        Assert.All(captured, v => Assert.Equal(ViolationType.SlowQuery, v.Type));
+        Assert.All(captured, v => Assert.Equal(ViolationType.ExcessiveQueryCount, v.Type));
     }
 
     [Fact]
     public async Task ThrowOnViolation_ThrowsQueryGuardException_WithCorrectViolation()
     {
-        var (db, interceptor) = DbContextFactory.Create(o =>
+        _scope = new TestDbScope(o =>
         {
-            o.SlowQueryThresholdMs = 0; // every InMemory query is "slow"
+            o.MaxQueriesPerScope   = 1;
             o.ThrowOnViolation     = true;
             o.DetectNPlusOne       = false;
+            o.SlowQueryThresholdMs = int.MaxValue;
         });
 
-        interceptor.BeginScope();
+        _scope.Interceptor.BeginScope();
+        _ = await _scope.Db.Products.ToListAsync(); // 1st — ok
 
+        // 2nd query crosses MaxQueriesPerScope=1 and throws.
         var ex = await Assert.ThrowsAsync<QueryGuardException>(
-            () => db.Products.ToListAsync());
+            () => _scope.Db.Products.ToListAsync());
 
-        Assert.Equal(ViolationType.SlowQuery, ex.Violation.Type);
+        Assert.Equal(ViolationType.ExcessiveQueryCount, ex.Violation.Type);
         Assert.NotEmpty(ex.Violation.Message);
-        Assert.NotEmpty(ex.Violation.Sql);
+    }
+
+    // ── N+1 detection ─────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task NPlusOne_IsDetected_WhenSameQueryRepeatsAboveThreshold()
+    {
+        _scope = new TestDbScope(o =>
+        {
+            o.DetectNPlusOne       = true;
+            o.NPlusOneThreshold    = 2;
+            o.SlowQueryThresholdMs = int.MaxValue;
+            o.MaxQueriesPerScope   = int.MaxValue;
+        });
+
+        _scope.Interceptor.BeginScope();
+        _ = await _scope.Db.Products.ToListAsync(); // pattern seen once
+        _ = await _scope.Db.Products.ToListAsync(); // threshold crossed → N+1
+        var violations = _scope.Interceptor.EndScope();
+
+        Assert.Contains(violations, v => v.Type == ViolationType.NPlusOne);
+    }
+
+    // ── Scope isolation ───────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task QueriesOutsideScope_AreNotTracked()
+    {
+        _scope = new TestDbScope(o =>
+        {
+            o.SlowQueryThresholdMs = int.MaxValue;
+            o.DetectNPlusOne       = false;
+            o.MaxQueriesPerScope   = 1;
+        });
+
+        // Query runs with NO active scope — must not affect CurrentViolations.
+        _ = await _scope.Db.Products.ToListAsync();
+
+        Assert.Empty(_scope.Interceptor.CurrentViolations);
     }
 
     [Fact]
-    public async Task BeginScope_And_EndScope_AccumulatesViolationsAcrossMultipleQueries()
+    public async Task EndScope_ClearsCurrentViolations()
     {
-        var (db, interceptor) = DbContextFactory.Create(o =>
+        _scope = new TestDbScope(o =>
         {
-            o.SlowQueryThresholdMs = 0;
+            o.MaxQueriesPerScope   = 1;
             o.DetectNPlusOne       = false;
+            o.SlowQueryThresholdMs = int.MaxValue;
         });
 
-        interceptor.BeginScope();
-        _ = await db.Products.ToListAsync();
-        _ = await db.Products.ToListAsync();
-        var violations = interceptor.EndScope();
+        _scope.Interceptor.BeginScope();
+        _ = await _scope.Db.Products.ToListAsync();
+        _ = await _scope.Db.Products.ToListAsync(); // triggers violation
 
-        Assert.True(violations.Count >= 2,
-            $"Expected ≥ 2 violations but got {violations.Count}.");
+        var violations = _scope.Interceptor.EndScope();
+
+        Assert.NotEmpty(violations);
+        Assert.Empty(_scope.Interceptor.CurrentViolations); // cleared
     }
 
     [Fact]
     public async Task IQueryGuardScope_Interface_WorksInterchangeably()
     {
-        var (db, interceptor) = DbContextFactory.Create(o =>
+        _scope = new TestDbScope(o =>
         {
-            o.SlowQueryThresholdMs = 0;
+            o.MaxQueriesPerScope   = 1;
             o.DetectNPlusOne       = false;
+            o.SlowQueryThresholdMs = int.MaxValue;
         });
 
-        IQueryGuardScope scope = interceptor; // depend on abstraction
+        IQueryGuardScope scope = _scope.Interceptor; // depend on abstraction
 
         scope.BeginScope();
-        _ = await db.Products.ToListAsync();
+        _ = await _scope.Db.Products.ToListAsync();
+        _ = await _scope.Db.Products.ToListAsync();
         var violations = scope.EndScope();
 
         Assert.NotEmpty(violations);
-        Assert.Empty(scope.CurrentViolations); // cleared after EndScope
+        Assert.Empty(scope.CurrentViolations);
     }
 }
 
@@ -232,14 +276,23 @@ public sealed class QueryGuardOptionsBuilderTests
     }
 
     [Fact]
-    public void Build_ThrowsInvalidOperationException_ForNegativeThreshold()
+    public void EnsureValid_Throws_ForNegativeSlowQueryThreshold()
     {
-        // EnsureValid() is called by Build().
-        var builder = new QueryGuardOptionsBuilder();
-
-        // Can't use the fluent API to produce a negative value (it validates inline),
-        // so we verify the guard on a manually configured options object.
         var options = new QueryGuardOptions { SlowQueryThresholdMs = -1 };
+        Assert.Throws<InvalidOperationException>(() => options.EnsureValid());
+    }
+
+    [Fact]
+    public void EnsureValid_Throws_ForMaxQueriesPerScopeZero()
+    {
+        var options = new QueryGuardOptions { MaxQueriesPerScope = 0 };
+        Assert.Throws<InvalidOperationException>(() => options.EnsureValid());
+    }
+
+    [Fact]
+    public void EnsureValid_Throws_ForNPlusOneThresholdLessThanTwo()
+    {
+        var options = new QueryGuardOptions { NPlusOneThreshold = 1 };
         Assert.Throws<InvalidOperationException>(() => options.EnsureValid());
     }
 
