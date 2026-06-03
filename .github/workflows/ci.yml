@@ -76,11 +76,12 @@ jobs:
             -p:Version=${{ steps.version.outputs.VERSION }} \
             --output ./nupkgs
 
-      # Push each .nupkg individually — dotnet nuget push only accepts one file
-      # at a time when the glob expands to multiple packages.
+      # Push .nupkg and .snupkg individually — dotnet nuget push accepts one file at a time.
+      # .snupkg files carry PDB symbols and are indexed by nuget.org for source-stepping in debuggers.
       - name: Publish to NuGet.org
         run: |
-          for package in ./nupkgs/*.nupkg; do
+          for package in ./nupkgs/*.nupkg ./nupkgs/*.snupkg; do
+            [ -f "$package" ] || continue   # skip if glob finds nothing
             echo "Publishing $package..."
             dotnet nuget push "$package" \
               --api-key "${{ secrets.NUGET_API_KEY }}" \

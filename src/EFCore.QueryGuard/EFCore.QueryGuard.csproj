@@ -22,6 +22,14 @@
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <!-- Version is overridden by CI from the git tag, e.g. v1.0.0 → 1.0.0 -->
     <VersionPrefix>1.0.0</VersionPrefix>
+
+    <!-- SourceLink: embed PDB symbols in the package so debuggers can step into library code -->
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+
+    <!-- Deterministic build: makes the binary reproducible byte-for-byte on any machine -->
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
   </PropertyGroup>
 
   <ItemGroup>
